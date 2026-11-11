@@ -107,6 +107,10 @@ public:
 	int Get_Extra_Overlap(void) {return PixelOverlap;}
 
 	void	Blit_Char( WideChar ch, uint16 *dest_ptr, int dest_stride, int x, int y );
+	// Render a complete RTL/mixed-script line through Windows' complex-script text path.
+	bool	Render_Text( const WideChar *text, int wrapWidth, bool centered, bool parseHotKey,
+															int textureWidth, int textureHeight, uint16 *dest, int destStride,
+														int *outWidth, int *outHeight, int *outX );
 
 private:
 
@@ -259,7 +263,9 @@ private:
 	void	Release_Pending_Surfaces (void);
 	void	Release_Spare_Textures (void);
 	void	Build_Sentence_Centered (const WideChar *text, int *hkX, int *hkY);
-	Vector2	Build_Sentence_Not_Centered (const WideChar *text, int *hkX, int *hkY,bool justCalcExtents = false );		
+	Vector2	Build_Sentence_Not_Centered (const WideChar *text, int *hkX, int *hkY,bool justCalcExtents = false );
+	bool	Build_Sentence_RTL( const WideChar *text, int *hkX, int *hkY, bool justCalcExtents,
+															bool centered, Vector2 *extent );		
 	//
 	//	Private member data
 	//
