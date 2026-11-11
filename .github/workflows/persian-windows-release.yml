@@ -1,0 +1,78 @@
+name: Persian Windows Release
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/**"
+      - "GeneralsMD/Code/Tests/test_ww3d2.cpp"
+      - ".github/workflows/persian-windows-release.yml"
+  push:
+    branches:
+      - feature/persian-rtl-text
+    paths:
+      - "GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/**"
+      - "GeneralsMD/Code/Tests/test_ww3d2.cpp"
+      - ".github/workflows/persian-windows-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-release:
+    runs-on: windows-2022
+    timeout-minutes: 150
+    steps:
+      - name: Check out Persian RTL branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Build Release executable
+        shell: pwsh
+        run: |
+          $env:ZHR_NO_ADDONS = "1"
+          cmd /c "build.bat Release generals"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build renderer test
+        shell: pwsh
+        run: |
+          cmake --build build64 --config Release --target test_ww3d2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run renderer test
+        shell: pwsh
+        run: |
+          ctest --test-dir build64 -C Release -R "^test_ww3d2$" --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Stage runtime files
+        shell: pwsh
+        run: |
+          if (!(Test-Path "GeneralsMD/Run/generals.exe")) {
+            throw "Build completed without GeneralsMD/Run/generals.exe"
+          }
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Get-ChildItem "GeneralsMD/Run" -File | Where-Object {
+            $_.Extension -ne ".big" -and $_.Name -notmatch "^BUILD-INFO"
+          } | Copy-Item -Destination artifacts/
+          Set-Content -Path artifacts/BUILD-INFO.txt -Value @(
+            "Zero Hour Reforged - Persian RTL experimental build"
+            "Branch: feature/persian-rtl-text"
+            "Configuration: Release x64"
+            "Game data archives are not included."
+            "Install next to a legally installed Zero Hour game."
+          )
+          Compress-Archive -Path artifacts/* -DestinationPath Persian-RTL-Windows-x64-Release.zip -Force
+
+      - name: Upload Release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: generals-persian-rtl-windows-x64-release
+          path: Persian-RTL-Windows-x64-Release.zip
+          if-no-files-found: error
+          retention-days: 14
