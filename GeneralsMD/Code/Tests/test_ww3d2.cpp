@@ -164,6 +164,47 @@ TEST(lod_copy_name_refuses_other_parts)
    fullscreenfit - where a scaled fullscreen picture goes on its monitor
   =========================================================================*/
 
+
+#if defined(_WIN32)
+TEST(rtl_text_renders_persian_glyphs_and_mixed_direction_lines)
+{
+	FontCharsClass font;
+	font.Initialize_GDI_Font( "Arial", 18, false );
+
+	// "سلام English 123!" followed by a second Persian line. Code units are explicit so this
+	// source file remains ASCII-only, as required by widechar_check.py.
+	static const WideChar sample[] = {
+		0x0633, 0x0644, 0x0627, 0x0645, ' ', 'E', 'n', 'g', 'l', 'i', 's', 'h', ' ',
+		'1', '2', '3', '!', '\\n',
+		0x0622, 0x0632, 0x0645, 0x0627, 0x06CC, 0x0634, ' ', 0x0641, 0x0627, 0x0631, 0x0633, 0
+	};
+	std::vector<uint16> pixels( 512 * 128, 0 );
+	int width = 0, height = 0, x = 0;
+	CHECK( font.Render_Text( sample, 240, false, false, 512, 128, &pixels[0], 512,
+			&width, &height, &x ) );
+	CHECK( width > 0 );
+	CHECK( height > font.Get_Char_Height() );
+	int ink = 0;
+	for (size_t i = 0; i < pixels.size(); ++i)
+		ink += pixels[i] != 0;
+	CHECK( ink > 0 );
+}
+
+TEST(rtl_text_hotkey_marker_is_not_drawn)
+{
+	FontCharsClass font;
+	font.Initialize_GDI_Font( "Arial", 18, false );
+	static const WideChar withHotkey[] = { 0x0633, 0x0644, 0x0627, 0x0645, ' ', '&', 'S', 't', 'a', 'r', 't', 0 };
+	static const WideChar withoutHotkey[] = { 0x0633, 0x0644, 0x0627, 0x0645, ' ', 'S', 't', 'a', 'r', 't', 0 };
+	std::vector<uint16> first( 512 * 64, 0 ), second( 512 * 64, 0 );
+	int w1 = 0, h1 = 0, x1 = 0, w2 = 0, h2 = 0, x2 = 0;
+	CHECK( font.Render_Text( withHotkey, 0, false, true, 512, 64, &first[0], 512, &w1, &h1, &x1 ) );
+	CHECK( font.Render_Text( withoutHotkey, 0, false, false, 512, 64, &second[0], 512, &w2, &h2, &x2 ) );
+	CHECK_EQ( w1, w2 );
+	CHECK_EQ( h1, h2 );
+}
+#endif
+
 TEST(fullscreen_fit_stretch_covers_the_whole_monitor)
 {
 	const FullscreenFitRect fit = Fullscreen_Fit(1920, 1200, 1280, 720, false);
