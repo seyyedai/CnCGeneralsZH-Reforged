@@ -40,6 +40,7 @@
 #if !defined(_WIN32)
 #include "glyphrasteriser.h"
 #include <math.h>
+#include <vector>
 #endif
 #include "surfaceclass.h"
 #include "texture.h"
@@ -60,6 +61,40 @@
 #define no_TEST_PLACEMENT 1	 // Shows alignment markers for text.
 
 #define TEXTURE_OFFSET 2
+
+#if defined(_WIN32)
+// DrawTextW delegates complex-script shaping and bidirectional layout to Uniscribe. Keep the old
+// per-character atlas path for Latin-only text; only strings containing RTL characters take this path.
+static bool ContainsRTLText( const WideChar *text )
+{
+	if (text == NULL)
+		return false;
+	for (const WideChar *p = text; *p != 0; ++p)
+	{
+		const unsigned int ch = (unsigned int)*p;
+		if ((ch >= 0x0590 && ch <= 0x08FF) ||
+				(ch >= 0xFB1D && ch <= 0xFDFF) ||
+				(ch >= 0xFE70 && ch <= 0xFEFF))
+			return true;
+	}
+	return false;
+}
+
+static bool FontHasPersianGlyphs( HDC dc, HFONT font )
+{
+	static const WCHAR sample[] = { 0x067E, 0x0686, 0x0698, 0x06AF, 0x06A9, 0x06CC, 0 };
+	HGDIOBJ previous = SelectObject( dc, font );
+	WORD glyphs[ 6 ] = { 0 };
+	const DWORD count = GetGlyphIndicesW( dc, sample, 6, glyphs, GGI_MARK_NONEXISTING_GLYPHS );
+	SelectObject( dc, previous );
+	if (count == GDI_ERROR)
+		return false;
+	for (int i = 0; i < 6; ++i)
+		if (glyphs[i] == 0xFFFF)
+			return false;
+	return true;
+}
+#endif
 ////////////////////////////////////////////////////////////////////////////////////
 //
 //	Render2DSentenceClass
@@ -1039,8 +1074,107 @@ void	Render2DSentenceClass::Build_Sentence_Centered (const WideChar *text, int *
 //	Build_Sentence_NotCentered
 //
 ////////////////////////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////////////////////////
+//
+//Build_Sentence_RTL
+//
+// Render a right-to-left or mixed-direction sentence as one shaped GDI run. The normal renderer
+// remains untouched for Latin-only strings and is used as a fallback for text too large for one
+// sentence texture.
+//
+////////////////////////////////////////////////////////////////////////////////////
+bool
+Render2DSentenceClass::Build_Sentence_RTL( const WideChar *text, int *hkX, int *hkY,
+		bool justCalcExtents, bool centered, Vector2 *extent )
+{
+#if defined(_WIN32)
+	if (Font == NULL)
+		return false;
+
+	const int textureSize = 512;
+	std::vector<uint16> rendered;
+	uint16 *pixels = NULL;
+	if (!justCalcExtents)
+	{
+		rendered.resize( (size_t)textureSize * textureSize, 0 );
+		pixels = &rendered[0];
+	}
+
+	bool hasNewline = false;
+	for (const WideChar *p = text; *p != 0 && !hasNewline; ++p)
+		hasNewline = (*p == u'\\n');
+	const bool alignCentered = centered && (WrapWidth > 0 || hasNewline);
+
+	int width = 0, height = 0, left = 0;
+	if (!Font->Render_Text( text, (int)WrapWidth, alignCentered, ParseHotKey,
+			textureSize, textureSize, pixels, textureSize, &width, &height, &left ))
+		return false;
+
+	if (extent != NULL)
+	{
+		// Wrapped/centred text occupies its layout box; unwrapped text uses its ink bounds.
+		extent->X = WrapWidth > 0 ? (float)WrapWidth : (float)width;
+		extent->Y = (float)height;
+	}
+	if (hkX) *hkX = 0;
+	if (hkY) *hkY = 0;
+	if (justCalcExtents)
+		return true;
+
+	Reset_Sentence_Data();
+	const int oldTextureSizeHint = TextureSizeHint;
+	TextureSizeHint = textureSize;
+	Allocate_New_Surface( text, false );
+	TextureSizeHint = oldTextureSizeHint;
+	if (CurSurface == NULL || CurrTextureSize < textureSize)
+		return false;
+
+	LockedPtr = (uint16 *)CurSurface->Lock( &LockedStride );
+	if (LockedPtr == NULL)
+		return false;
+	const int stride = LockedStride / (int)sizeof( uint16 );
+	if (stride < textureSize)
+	{
+		CurSurface->Unlock();
+		LockedPtr = NULL;
+		return false;
+	}
+	for (int y = 0; y < textureSize; ++y)
+		memcpy( LockedPtr + (size_t)y * stride,
+					&rendered[(size_t)y * textureSize], (size_t)textureSize * sizeof( uint16 ) );
+	CurSurface->Unlock();
+	LockedPtr = NULL;
+
+	SentenceDataStruct sentenceData;
+	sentenceData.Surface = CurSurface;
+	sentenceData.Surface->Add_Ref();
+	sentenceData.ScreenRect.Left = (float)left;
+	sentenceData.ScreenRect.Right = (float)(left + width);
+	sentenceData.ScreenRect.Top = 0.0f;
+	sentenceData.ScreenRect.Bottom = (float)height;
+	sentenceData.UVRect.Left = 0.0f;
+	sentenceData.UVRect.Top = 0.0f;
+	sentenceData.UVRect.Right = (float)width;
+	sentenceData.UVRect.Bottom = (float)height;
+	SentenceData.Add( sentenceData );
+	return true;
+#else
+	(void)text; (void)hkX; (void)hkY; (void)justCalcExtents; (void)centered; (void)extent;
+	return false;
+#endif
+}
+
 Vector2	Render2DSentenceClass::Build_Sentence_Not_Centered (const WideChar *text, int *hkX, int *hkY, bool justCalcExtents)
 {
+#if defined(_WIN32)
+	if (ContainsRTLText( text ))
+	{
+		Vector2 rtlExtent;
+		if (Build_Sentence_RTL( text, hkX, hkY, justCalcExtents, Centered, &rtlExtent ))
+			return rtlExtent;
+	}
+#endif
 	Vector2 cursor = Cursor;
 	int textureStartX = TextureStartX;
 	float maxX = 0;
@@ -1244,6 +1378,15 @@ Render2DSentenceClass::Build_Sentence (const WideChar *text, int *hkX, int *hkY)
 		return;
 	}
 
+#if defined(_WIN32)
+	if (ContainsRTLText( text ))
+	{
+		Vector2 rtlExtent;
+		if (Build_Sentence_RTL( text, hkX, hkY, false, Centered, &rtlExtent ))
+			return;
+	}
+#endif
+
 	//	WideChar is char16_t, which the C library's wcschr does not take: look for the newline by hand.
 	bool has_newline = false;
 	for (const WideChar *p = text; *p != 0 && !has_newline; ++p)
@@ -1427,6 +1570,200 @@ FontCharsClass::Blit_Char (WideChar ch, uint16 *dest_ptr, int dest_stride, int x
 //
 //	Store_GDI_Char
 //
+
+////////////////////////////////////////////////////////////////////////////////////
+//
+//Render_Text
+//
+// Render a complete line/block with the Windows complex-script text path. Drawing the whole run
+// lets Uniscribe shape Arabic and resolve mixed RTL/LTR ordering before it becomes a sentence texture.
+//
+////////////////////////////////////////////////////////////////////////////////////
+bool
+FontCharsClass::Render_Text( const WideChar *text, int wrapWidth, bool centered, bool parseHotKey,
+		int textureWidth, int textureHeight, uint16 *dest, int destStride,
+		int *outWidth, int *outHeight, int *outX )
+{
+#if defined(_WIN32)
+	if (text == NULL || textureWidth < 1 || textureHeight < 1)
+		return false;
+	if (wrapWidth > 0 && wrapWidth > textureWidth - 2)
+		return false;
+
+	// The primary face may not contain Arabic. Use the configured Unicode fallback for the whole run
+	// so Persian, Latin, digits and punctuation are laid out together by one text engine.
+	FontCharsClass *drawFont = AlternateUnicodeFont != NULL ? AlternateUnicodeFont : this;
+	HFONT selectedFont = drawFont->GDIFont != NULL ? drawFont->GDIFont : GDIFont;
+	if (selectedFont == NULL)
+		return false;
+
+	std::vector<WideChar> displayText;
+	for (const WideChar *p = text; *p != 0; ++p)
+	{
+		if (parseHotKey && *p == (WideChar)'&' && p[1] != 0 &&
+				p[1] > (WideChar)' ' && p[1] != (WideChar)'\\n')
+			continue;
+		displayText.push_back(*p);
+	}
+	if (displayText.empty())
+		return false;
+
+	HDC dc = CreateCompatibleDC( MemDC );
+	if (dc == NULL)
+		return false;
+
+	// Arial Unicode MS is not installed on every Windows machine. Verify the four Persian-specific
+	// letters explicitly; if the configured Unicode face lacks them, use a system UI font that has
+	// Persian coverage. Keep the requested point size, weight and style.
+	HGDIOBJ oldFont = SelectObject( dc, selectedFont );
+	HFONT fallbackFont = NULL;
+	if (!FontHasPersianGlyphs( dc, selectedFont ))
+	{
+		SelectObject( dc, oldFont );
+		LOGFONTW logicalFont;
+		memset( &logicalFont, 0, sizeof( logicalFont ) );
+		if (GetObjectW( selectedFont, sizeof( logicalFont ), &logicalFont ) == sizeof( logicalFont ))
+		{
+			static const WCHAR *fallbackFaces[] = { L"Tahoma", L"Segoe UI", L"Microsoft Sans Serif" };
+			for (int i = 0; i < 3 && fallbackFont == NULL; ++i)
+			{
+				lstrcpynW( logicalFont.lfFaceName, fallbackFaces[i], LF_FACESIZE );
+				HFONT candidate = CreateFontIndirectW( &logicalFont );
+				if (candidate == NULL)
+					continue;
+				HGDIOBJ candidateOld = SelectObject( dc, candidate );
+				if (FontHasPersianGlyphs( dc, candidate ))
+				{
+					fallbackFont = candidate;
+					oldFont = candidateOld;
+					selectedFont = candidate;
+				}
+				else
+				{
+					SelectObject( dc, candidateOld );
+					DeleteObject( candidate );
+				}
+			}
+		}
+		if (fallbackFont == NULL)
+			oldFont = SelectObject( dc, selectedFont );
+	}
+
+	BITMAPINFO bitmapInfo;
+	memset( &bitmapInfo, 0, sizeof( bitmapInfo ) );
+	bitmapInfo.bmiHeader.biSize = sizeof( BITMAPINFOHEADER );
+	bitmapInfo.bmiHeader.biWidth = textureWidth;
+	bitmapInfo.bmiHeader.biHeight = -textureHeight;
+	bitmapInfo.bmiHeader.biPlanes = 1;
+	bitmapInfo.bmiHeader.biBitCount = 32;
+	bitmapInfo.bmiHeader.biCompression = BI_RGB;
+	void *dibBits = NULL;
+	HBITMAP dib = CreateDIBSection( dc, &bitmapInfo, DIB_RGB_COLORS, &dibBits, NULL, 0 );
+	if (dib == NULL || dibBits == NULL)
+	{
+		if (dib != NULL)
+			DeleteObject( dib );
+		SelectObject( dc, oldFont );
+		if (fallbackFont != NULL)
+			DeleteObject( fallbackFont );
+		DeleteDC( dc );
+		return false;
+	}
+
+	HGDIOBJ oldBitmap = SelectObject( dc, dib );
+	memset( dibBits, 0, (size_t)textureWidth * textureHeight * 4 );
+	SetMapMode( dc, MM_TEXT );
+	SetBkMode( dc, TRANSPARENT );
+	SetTextColor( dc, RGB( 255, 255, 255 ) );
+	SetTextCharacterExtra( dc, 0 );
+
+	const int drawWidth = wrapWidth > 0 ? wrapWidth : textureWidth;
+	RECT rect;
+	rect.left = 0;
+	rect.top = 0;
+	rect.right = drawWidth;
+	rect.bottom = textureHeight;
+	UINT flags = DT_NOPREFIX | DT_RTLREADING;
+	if (wrapWidth > 0)
+		flags |= DT_WORDBREAK;
+	flags |= centered ? DT_CENTER : DT_RIGHT;
+
+	const int drawnHeight = DrawTextW( dc, reinterpret_cast<LPCWSTR>( &displayText[0] ),
+			(int)displayText.size(), &rect, flags );
+	if (drawnHeight <= 0)
+	{
+ 		SelectObject( dc, oldFont );
+		SelectObject( dc, oldBitmap );
+		DeleteObject( dib );
+		if (fallbackFont != NULL) DeleteObject( fallbackFont );
+		DeleteDC( dc );
+		return false;
+	}
+
+	const uint8 *dibPixels = (const uint8 *)dibBits;
+	int minX = drawWidth, minY = textureHeight, maxX = -1, maxY = -1;
+	for (int y = 0; y < textureHeight; ++y)
+	{
+		for (int x = 0; x < drawWidth; ++x)
+		{
+			const uint8 *pixel = dibPixels + ((size_t)y * textureWidth + x) * 4;
+			const uint8 coverage = max( pixel[0], max( pixel[1], pixel[2] ) );
+			if (coverage != 0)
+			{
+				if (x < minX) minX = x;
+				if (x > maxX) maxX = x;
+				if (y < minY) minY = y;
+				if (y > maxY) maxY = y;
+			}
+		}
+	}
+
+	bool ok = maxX >= minX && maxY >= minY &&
+			maxX < drawWidth - 1 && maxY < textureHeight - 1;
+	const int width = ok ? maxX - minX + 1 : 0;
+	const int height = ok ? maxY - minY + 1 : 0;
+	if (ok && dest != NULL)
+	{
+		if (destStride < width)
+			ok = false;
+		else
+		{
+			for (int y = 0; y < textureHeight; ++y)
+				memset( dest + (size_t)y * destStride, 0, (size_t)destStride * sizeof( uint16 ) );
+			for (int y = 0; y < height; ++y)
+			{
+				for (int x = 0; x < width; ++x)
+				{
+					const uint8 *pixel = dibPixels + ((size_t)(minY + y) * textureWidth + minX + x) * 4;
+					const uint8 coverage = max( pixel[0], max( pixel[1], pixel[2] ) );
+					const uint8 alpha = (uint8)( sqrt( coverage / 255.0 ) * 15.0 + 0.5 );
+					dest[(size_t)y * destStride + x] = alpha != 0 ? (uint16)( 0x0FFF | (alpha << 12) ) : 0;
+				}
+			}
+		}
+	}
+
+	if (ok)
+	{
+		if (outWidth) *outWidth = width;
+		if (outHeight) *outHeight = height;
+		if (outX) *outX = wrapWidth > 0 ? minX : 0;
+	}
+
+ 	SelectObject( dc, oldFont );
+	SelectObject( dc, oldBitmap );
+	DeleteObject( dib );
+	if (fallbackFont != NULL) DeleteObject( fallbackFont );
+	DeleteDC( dc );
+	return ok;
+#else
+	(void)text; (void)wrapWidth; (void)centered; (void)parseHotKey;
+	(void)textureWidth; (void)textureHeight; (void)dest; (void)destStride;
+	(void)outWidth; (void)outHeight; (void)outX;
+	return false;
+#endif
+}
+
 ////////////////////////////////////////////////////////////////////////////////////
 const FontCharsClassCharDataStruct *
 FontCharsClass::Store_GDI_Char (WideChar ch)
