@@ -17,7 +17,7 @@ permissions:
 jobs:
   windows-release:
     runs-on: windows-2022
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - name: Check out Persian RTL branch
         uses: actions/checkout@v4
@@ -25,47 +25,68 @@ jobs:
           ref: feature/persian-rtl-text
           fetch-depth: 0
 
-      - name: Build Release executable
+      - name: Fetch pinned third-party sources
         shell: pwsh
+        timeout-minutes: 45
         run: |
           $env:ZHR_NO_ADDONS = "1"
-          cmd /c "build.bat Release generals"
+          & "$PWD/GeneralsMD/Code/Tools/vendor.ps1" -NoAddons
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build renderer test
+      - name: Configure Windows x64 Release
         shell: pwsh
+        timeout-minutes: 15
         run: |
-          cmake --build build64 --config Release --target test_ww3d2
+          cmake -S GeneralsMD/Code -B build64 -G "Visual Studio 17 2022" -A x64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Run renderer test
+      - name: Compile generals.exe Release
         shell: pwsh
+        timeout-minutes: 90
+        run: |
+          cmake --build build64 --config Release --target generals --parallel 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path "GeneralsMD/Run/generals.exe")) {
+            throw "Build completed without GeneralsMD/Run/generals.exe"
+          }
+
+      - name: Compile renderer regression test
+        shell: pwsh
+        timeout-minutes: 30
+        run: |
+          cmake --build build64 --config Release --target test_ww3d2 --parallel 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run renderer regression test
+        shell: pwsh
+        timeout-minutes: 10
         run: |
           ctest --test-dir build64 -C Release -R "^test_ww3d2$" --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Stage executable and shipped renderer data
+      - name: Stage runtime package
         shell: pwsh
         run: |
           if (!(Test-Path "GeneralsMD/Run/generals.exe")) {
-            throw "Build completed without GeneralsMD/Run/generals.exe"
+            throw "Missing generals.exe"
           }
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          Copy-Item "GeneralsMD/Run/generals.exe" artifacts/
-          if (Test-Path "GeneralsMD/Run/dx11shaders.shipped") {
-            Copy-Item "GeneralsMD/Run/dx11shaders.shipped" artifacts/
-          }
+          Get-ChildItem "GeneralsMD/Run" -File | Where-Object {
+            $_.Extension -ne ".big" -and $_.Name -notmatch "^BUILD-INFO"
+          } | Copy-Item -Destination artifacts/
           Set-Content -Path artifacts/BUILD-INFO.txt -Value @(
             "Zero Hour Reforged - Persian RTL experimental build"
             "Branch: feature/persian-rtl-text"
             "Configuration: Release x64"
-            "Game data files are not included."
+            "Game data archives are not included."
+            "Install beside a legally installed Zero Hour game."
           )
+          Compress-Archive -Path artifacts/* -DestinationPath Persian-RTL-Windows-x64-Release.zip -Force
 
-      - name: Upload Release executable
+      - name: Upload Release package
         uses: actions/upload-artifact@v4
         with:
           name: generals-persian-rtl-windows-x64-release
-          path: artifacts/*
+          path: Persian-RTL-Windows-x64-Release.zip
           if-no-files-found: error
           retention-days: 14
