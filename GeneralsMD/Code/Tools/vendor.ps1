@@ -166,7 +166,18 @@ function Install-Mbedtls {
       (Select-String -LiteralPath $versionHeader -Pattern 'MBEDTLS_VERSION_STRING         "3.6.7"' -SimpleMatch -Quiet)) { return }
   $sha = 'A7E8BCBEC0E6F761B4AF24F25677626B35F762F68EEF79C08677A363212D11F6'
   $archive = Get-File 'https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2' (Join-Path $work 'mbedtls-3.6.7.tar.bz2')
-  $hash = (Get-FileHash $archive -Algorithm SHA256).Hash
+  # Use .NET directly rather than relying on PowerShell's optional Utility module being auto-loaded.
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $stream = [System.IO.File]::OpenRead($archive)
+    try {
+      $hash = ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+    } finally {
+      $stream.Dispose()
+    }
+  } finally {
+    $sha256.Dispose()
+  }
   if ($hash -ne $sha) {
     Remove-Item $archive -ErrorAction SilentlyContinue
     throw "mbedtls-3.6.7.tar.bz2 downloaded with hash $hash, and the release was published as $sha"
