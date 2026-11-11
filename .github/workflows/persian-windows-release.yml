@@ -7,6 +7,7 @@ on:
     paths:
       - "GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/**"
       - "GeneralsMD/Code/Tests/test_ww3d2.cpp"
+      - "GeneralsMD/Code/Tools/vendor.ps1"
       - ".github/workflows/persian-windows-release.yml"
   workflow_dispatch:
 
