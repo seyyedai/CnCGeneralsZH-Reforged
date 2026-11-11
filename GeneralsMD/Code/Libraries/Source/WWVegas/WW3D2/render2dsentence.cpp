@@ -79,6 +79,21 @@ static bool ContainsRTLText( const WideChar *text )
 	}
 	return false;
 }
+
+static bool FontHasPersianGlyphs( HDC dc, HFONT font )
+{
+	static const WCHAR sample[] = { 0x067E, 0x0686, 0x0698, 0x06AF, 0x06A9, 0x06CC, 0 };
+	HGDIOBJ previous = SelectObject( dc, font );
+	WORD glyphs[ 6 ] = { 0 };
+	const DWORD count = GetGlyphIndicesW( dc, sample, 6, glyphs, GGI_MARK_NONEXISTING_GLYPHS );
+	SelectObject( dc, previous );
+	if (count == GDI_ERROR)
+		return false;
+	for (int i = 0; i < 6; ++i)
+		if (glyphs[i] == 0xFFFF)
+			return false;
+	return true;
+}
 #endif
 ////////////////////////////////////////////////////////////////////////////////////
 //
@@ -1086,8 +1101,13 @@ Render2DSentenceClass::Build_Sentence_RTL( const WideChar *text, int *hkX, int *
 		pixels = &rendered[0];
 	}
 
+	bool hasNewline = false;
+	for (const WideChar *p = text; *p != 0 && !hasNewline; ++p)
+		hasNewline = (*p == u'\\n');
+	const bool alignCentered = centered && (WrapWidth > 0 || hasNewline);
+
 	int width = 0, height = 0, left = 0;
-	if (!Font->Render_Text( text, (int)WrapWidth, centered, ParseHotKey,
+	if (!Font->Render_Text( text, (int)WrapWidth, alignCentered, ParseHotKey,
 			textureSize, textureSize, pixels, textureSize, &width, &height, &left ))
 		return false;
 
@@ -1591,6 +1611,43 @@ FontCharsClass::Render_Text( const WideChar *text, int wrapWidth, bool centered,
 	if (dc == NULL)
 		return false;
 
+	// Arial Unicode MS is not installed on every Windows machine. Verify the four Persian-specific
+	// letters explicitly; if the configured Unicode face lacks them, use a system UI font that has
+	// Persian coverage. Keep the requested point size, weight and style.
+	HGDIOBJ oldFont = SelectObject( dc, selectedFont );
+	HFONT fallbackFont = NULL;
+	if (!FontHasPersianGlyphs( dc, selectedFont ))
+	{
+		SelectObject( dc, oldFont );
+		LOGFONTW logicalFont;
+		memset( &logicalFont, 0, sizeof( logicalFont ) );
+		if (GetObjectW( selectedFont, sizeof( logicalFont ), &logicalFont ) == sizeof( logicalFont ))
+		{
+			static const WCHAR *fallbackFaces[] = { L"Tahoma", L"Segoe UI", L"Microsoft Sans Serif" };
+			for (int i = 0; i < 3 && fallbackFont == NULL; ++i)
+			{
+				lstrcpynW( logicalFont.lfFaceName, fallbackFaces[i], LF_FACESIZE );
+				HFONT candidate = CreateFontIndirectW( &logicalFont );
+				if (candidate == NULL)
+					continue;
+				HGDIOBJ candidateOld = SelectObject( dc, candidate );
+				if (FontHasPersianGlyphs( dc, candidate ))
+				{
+					fallbackFont = candidate;
+					oldFont = candidateOld;
+					selectedFont = candidate;
+				}
+				else
+				{
+					SelectObject( dc, candidateOld );
+					DeleteObject( candidate );
+				}
+			}
+		}
+		if (fallbackFont == NULL)
+			oldFont = SelectObject( dc, selectedFont );
+	}
+
 	BITMAPINFO bitmapInfo;
 	memset( &bitmapInfo, 0, sizeof( bitmapInfo ) );
 	bitmapInfo.bmiHeader.biSize = sizeof( BITMAPINFOHEADER );
@@ -1610,7 +1667,6 @@ FontCharsClass::Render_Text( const WideChar *text, int wrapWidth, bool centered,
 	}
 
 	HGDIOBJ oldBitmap = SelectObject( dc, dib );
-	HGDIOBJ oldFont = SelectObject( dc, selectedFont );
 	memset( dibBits, 0, (size_t)textureWidth * textureHeight * 4 );
 	SetMapMode( dc, MM_TEXT );
 	SetBkMode( dc, TRANSPARENT );
@@ -1632,9 +1688,10 @@ FontCharsClass::Render_Text( const WideChar *text, int wrapWidth, bool centered,
 			(int)displayText.size(), &rect, flags );
 	if (drawnHeight <= 0)
 	{
-		SelectObject( dc, oldFont );
+ 		SelectObject( dc, oldFont );
 		SelectObject( dc, oldBitmap );
 		DeleteObject( dib );
+		if (fallbackFont != NULL) DeleteObject( fallbackFont );
 		DeleteDC( dc );
 		return false;
 	}
@@ -1689,9 +1746,10 @@ FontCharsClass::Render_Text( const WideChar *text, int wrapWidth, bool centered,
 		if (outX) *outX = wrapWidth > 0 ? minX : 0;
 	}
 
-	SelectObject( dc, oldFont );
+ 	SelectObject( dc, oldFont );
 	SelectObject( dc, oldBitmap );
 	DeleteObject( dib );
+	if (fallbackFont != NULL) DeleteObject( fallbackFont );
 	DeleteDC( dc );
 	return ok;
 #else
