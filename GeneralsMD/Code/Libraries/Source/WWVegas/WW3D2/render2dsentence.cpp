@@ -1113,7 +1113,8 @@ Render2DSentenceClass::Build_Sentence_RTL( const WideChar *text, int *hkX, int *
 
 	if (extent != NULL)
 	{
-		extent->X = (float)(left + width);
+		// Wrapped/centred text occupies its layout box; unwrapped text uses its ink bounds.
+		extent->X = WrapWidth > 0 ? (float)WrapWidth : (float)width;
 		extent->Y = (float)height;
 	}
 	if (hkX) *hkX = 0;
@@ -1662,6 +1663,9 @@ FontCharsClass::Render_Text( const WideChar *text, int wrapWidth, bool centered,
 	{
 		if (dib != NULL)
 			DeleteObject( dib );
+		SelectObject( dc, oldFont );
+		if (fallbackFont != NULL)
+			DeleteObject( fallbackFont );
 		DeleteDC( dc );
 		return false;
 	}
